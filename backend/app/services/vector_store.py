@@ -1,23 +1,90 @@
+import math
 from typing import List, Dict, Any
-import chromadb
-from chromadb.config import Settings
 from app.config import VECTOR_STORE_DIR
+
+try:
+    import chromadb
+    HAS_CHROMADB = True
+except ImportError:
+    HAS_CHROMADB = False
+
+class FallbackVectorStore:
+    """In-memory cosine similarity vector store for serverless environments."""
+    def __init__(self):
+        self.chunks = [] # list of {"id", "text", "embedding", "metadata"}
+
+    def add(self, ids, documents, embeddings, metadatas):
+        for cid, doc, emb, meta in zip(ids, documents, embeddings, metadatas):
+            self.chunks.append({
+                "chunk_id": cid,
+                "text": doc,
+                "embedding": emb,
+                "metadata": meta
+            })
+
+    def query(self, query_embeddings, n_results=5, include=None):
+        if not self.chunks or not query_embeddings:
+            return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+        q_vec = query_embeddings[0]
+        q_norm = math.sqrt(sum(x * x for x in q_vec)) or 1.0
+
+        scored = []
+        for item in self.chunks:
+            emb = item["embedding"]
+            e_norm = math.sqrt(sum(x * x for x in emb)) or 1.0
+            dot = sum(a * b for a, b in zip(q_vec, emb))
+            cosine_sim = dot / (q_norm * e_norm)
+            cosine_dist = max(0.0, 1.0 - cosine_sim)
+            scored.append((item, cosine_dist))
+
+        scored.sort(key=lambda x: x[1])
+        top = scored[:n_results]
+
+        docs = [item["text"] for item, _ in top]
+        metas = [item["metadata"] for item, _ in top]
+        dists = [dist for _, dist in top]
+
+        return {
+            "documents": [docs],
+            "metadatas": [metas],
+            "distances": [dists]
+        }
+
+    def delete(self, where=None):
+        if where and "document_id" in where:
+            doc_id = where["document_id"]
+            self.chunks = [c for c in self.chunks if c["metadata"].get("document_id") != doc_id]
+
+    def count(self):
+        return len(self.chunks)
+
 
 class VectorStoreService:
     def __init__(self, collection_name: str = "knowledge_base_chunks"):
-        try:
-            self.client = chromadb.PersistentClient(path=str(VECTOR_STORE_DIR))
-        except Exception:
-            # Ephemeral fallback for serverless execution
-            self.client = chromadb.Client()
-
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"}
-        )
+        self.use_chroma = HAS_CHROMADB
+        if HAS_CHROMADB:
+            try:
+                self.client = chromadb.PersistentClient(path=str(VECTOR_STORE_DIR))
+                self.collection = self.client.get_or_create_collection(
+                    name=collection_name,
+                    metadata={"hnsw:space": "cosine"}
+                )
+            except Exception:
+                try:
+                    self.client = chromadb.Client()
+                    self.collection = self.client.get_or_create_collection(
+                        name=collection_name,
+                        metadata={"hnsw:space": "cosine"}
+                    )
+                except Exception:
+                    self.use_chroma = False
+                    self.collection = FallbackVectorStore()
+        else:
+            self.collection = FallbackVectorStore()
 
     def add_chunks(self, chunks: List[Dict[str, Any]], embeddings: List[List[float]]):
-        """Add text chunks, metadata, and embeddings to ChromaDB."""
+        """Add text chunks, metadata, and embeddings to vector store."""
         if not chunks:
             return
 
