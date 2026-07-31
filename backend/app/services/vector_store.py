@@ -5,7 +5,12 @@ from app.config import VECTOR_STORE_DIR
 
 class VectorStoreService:
     def __init__(self, collection_name: str = "knowledge_base_chunks"):
-        self.client = chromadb.PersistentClient(path=str(VECTOR_STORE_DIR))
+        try:
+            self.client = chromadb.PersistentClient(path=str(VECTOR_STORE_DIR))
+        except Exception:
+            # Ephemeral fallback for serverless execution
+            self.client = chromadb.Client()
+
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
             metadata={"hnsw:space": "cosine"}
@@ -45,7 +50,6 @@ class VectorStoreService:
             distances = results["distances"][0]
 
             for doc_text, meta, dist in zip(docs, metas, distances):
-                # Cosine distance to similarity score conversion (approx: 1 - cosine_distance)
                 similarity_score = max(0.0, round(1.0 - float(dist), 4))
                 retrieved_items.append({
                     "document_id": meta.get("document_id"),
